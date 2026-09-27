@@ -1,0 +1,9 @@
+node_modules/
+.env
+data/*
+!data/.gitkeep
+todos.txt
+notes.txt
+*.log
+old_code
+.DS_Store
