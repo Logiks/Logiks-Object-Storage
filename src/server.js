@@ -2,13 +2,14 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { Readable } from 'node:stream';
 import mime from 'mime-types';
 import { v4 as uuid } from 'uuid';
-import { FileSystemStorage } from './storage/filesystem.js';
+import { createStorage } from './storage/index.js';
 import { createDb } from './db.js';
 
 const PORT = Number(process.env.PORT || 8080);
-const ROOT = process.env.STORAGE_ROOT || './data/objects';
+const BACKEND = (process.env.STORAGE_BACKEND || 'filesystem').toLowerCase();
 const TMP = process.env.TMP_ROOT || './data/tmp';
 const DB_PATH = process.env.DB_PATH || './data/metadata.db';
 const PUBLIC = (process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
@@ -20,9 +21,14 @@ if (API_KEY === 'change-me' || PRESIGN_SECRET === 'change-this') {
   console.warn('WARNING: STORAGE_API_KEY and/or PRESIGN_SECRET are still set to their insecure defaults. Set both before exposing this service.');
 }
 
-fs.mkdirSync(ROOT, { recursive: true }); fs.mkdirSync(TMP, { recursive: true });
+// TMP always holds local multipart-part staging files regardless of backend
+// (parts land on local disk as they're uploaded, then get streamed to
+// whichever backend on complete). STORAGE_ROOT only applies to the
+// filesystem backend, so only create it for that backend.
+fs.mkdirSync(TMP, { recursive: true });
+if (BACKEND === 'filesystem' || BACKEND === 'fs') fs.mkdirSync(process.env.STORAGE_ROOT || './data/objects', { recursive: true });
 const db = createDb(DB_PATH);
-const storage = new FileSystemStorage(ROOT, TMP);
+const storage = createStorage(process.env);
 const app = express();
 app.disable('x-powered-by');
 // No route reads a JSON body — every write is a raw byte stream (object PUTs, multipart parts).
@@ -63,7 +69,7 @@ function upsert(bucket,key,result,contentType) {
   return { ...result, etag };
 }
 
-app.get('/api/v1/health', (_,res)=>res.json({ ok:true, service:'object-storage', maxObjectSize:MAX }));
+app.get('/api/v1/health', (_,res)=>res.json({ ok:true, service:'object-storage', backend:BACKEND, maxObjectSize:MAX }));
 
 app.put('/api/v1/objects/:bucket/*key', async (req,res,next)=>{
   try {
@@ -85,7 +91,7 @@ async function serveObject(req,res,allowPresigned=true) {
   res.setHeader('Content-Disposition',`inline; filename*=UTF-8''${encodeURIComponent(path.basename(key))}`);
   if (!range) {
     res.setHeader('Content-Length',stat.size);
-    const s = storage.stream(bucket,key);
+    const s = await storage.createReadStream(bucket,key);
     s.on('error', err => { if (!res.headersSent) res.status(500); res.end(); console.error(err); });
     return s.pipe(res);
   }
@@ -95,7 +101,7 @@ async function serveObject(req,res,allowPresigned=true) {
   if (end >= stat.size) end = stat.size - 1; // clamp an over-long range instead of rejecting it
   if(start>end || start<0 || stat.size===0) return res.status(416).set('Content-Range',`bytes */${stat.size}`).end();
   res.status(206).set('Content-Range',`bytes ${start}-${end}/${stat.size}`).set('Content-Length',end-start+1);
-  const s = fs.createReadStream(storage.safePath(bucket,key),{start,end});
+  const s = await storage.createReadStream(bucket,key,{start,end});
   s.on('error', err => { if (!res.headersSent) res.status(500); res.end(); console.error(err); });
   s.pipe(res);
 }
@@ -127,7 +133,15 @@ app.get('/api/v1/objects/:bucket', (req,res)=>{
 // order, and "/multipart/<uploadId>/complete" also matches "/:bucket/*key" (bucket=<uploadId>,
 // key=["complete"]), which would silently start a brand-new upload instead of completing one.
 app.put('/api/v1/multipart/:uploadId/:partNumber', async (req,res,next)=>{try{const p=db.prepare("SELECT * FROM multipart_uploads WHERE upload_id=? AND status='active'").get(req.params.uploadId);if(!p)return res.status(404).json({error:'Upload not found'});const n=Number(req.params.partNumber);if(!Number.isInteger(n)||n<1||n>10000)return res.status(400).json({error:'Invalid part number'});const file=path.join(TMP,`${p.upload_id}-${n}.part`);const hash=crypto.createHash('sha256');let size=0;const out=fs.createWriteStream(file,{flags:'w'});try{for await(const c of req){size+=c.length;if(size>MAX)throw Object.assign(new Error('Part too large'),{code:'LIMIT'});hash.update(c);if(!out.write(c))await new Promise(r=>out.once('drain',r));}await new Promise((r,j)=>{out.end(r);out.once('error',j)});}catch(e){out.destroy();await fs.promises.rm(file,{force:true});throw e;}const sha=hash.digest('hex');db.prepare('INSERT INTO multipart_parts(upload_id,part_number,path,size,sha256,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(upload_id,part_number) DO UPDATE SET path=excluded.path,size=excluded.size,sha256=excluded.sha256,created_at=excluded.created_at').run(p.upload_id,n,file,size,sha,new Date().toISOString());res.status(201).json({uploadId:p.upload_id,partNumber:n,size,sha256:sha,etag:`"${sha}"`});}catch(e){if(e.code==='LIMIT')return res.status(413).json({error:e.message});next(e)}});
-app.post('/api/v1/multipart/:uploadId/complete', async (req,res,next)=>{try{const p=db.prepare("SELECT * FROM multipart_uploads WHERE upload_id=? AND status='active'").get(req.params.uploadId);if(!p)return res.status(404).json({error:'Upload not found'});const parts=db.prepare('SELECT * FROM multipart_parts WHERE upload_id=? ORDER BY part_number').all(p.upload_id);if(!parts.length)return res.status(400).json({error:'No parts'});const target=storage.safePath(p.bucket,p.key);await fs.promises.mkdir(path.dirname(target),{recursive:true});const temp=path.join(TMP,`${p.upload_id}.assembled`);const out=fs.createWriteStream(temp,{flags:'w'});const hash=crypto.createHash('sha256');let size=0;try{for(const part of parts){if(size + part.size > MAX) throw Object.assign(new Error('Object exceeds MAX_OBJECT_SIZE'), { code: 'LIMIT' }); const input=fs.createReadStream(part.path);for await(const c of input){size+=c.length;hash.update(c);if(!out.write(c))await new Promise(r=>out.once('drain',r));}}await new Promise((r,j)=>{out.end(r);out.once('error',j)});await fs.promises.rename(temp,target);}catch(e){out.destroy();await fs.promises.rm(temp,{force:true});throw e;}const sha=hash.digest('hex');const meta=upsert(p.bucket,p.key,{size,sha256:sha,path:target},p.content_type);db.prepare("UPDATE multipart_uploads SET status='completed' WHERE upload_id=?").run(p.upload_id);for(const part of parts)await fs.promises.rm(part.path,{force:true});res.status(201).json({bucket:p.bucket,key:p.key,size,sha256:sha,etag:meta.etag,url:`${PUBLIC}/api/v1/objects/${p.bucket}/${p.key}`});}catch(e){if(e.code==='LIMIT') return res.status(413).json({error:e.message}); next(e)}});
+// Concatenates the local part files, in order, into one Readable — streamed
+// straight into storage.putStream so completion works the same way against
+// any backend, instead of each backend needing its own multipart assembly.
+async function* concatFiles(paths) {
+  for (const p of paths) {
+    for await (const chunk of fs.createReadStream(p)) yield chunk;
+  }
+}
+app.post('/api/v1/multipart/:uploadId/complete', async (req,res,next)=>{try{const p=db.prepare("SELECT * FROM multipart_uploads WHERE upload_id=? AND status='active'").get(req.params.uploadId);if(!p)return res.status(404).json({error:'Upload not found'});const parts=db.prepare('SELECT * FROM multipart_parts WHERE upload_id=? ORDER BY part_number').all(p.upload_id);if(!parts.length)return res.status(400).json({error:'No parts'});const combined=Readable.from(concatFiles(parts.map(x=>x.path)));const result=await storage.putStream(p.bucket,p.key,combined,MAX);const meta=upsert(p.bucket,p.key,result,p.content_type);db.prepare("UPDATE multipart_uploads SET status='completed' WHERE upload_id=?").run(p.upload_id);for(const part of parts)await fs.promises.rm(part.path,{force:true});res.status(201).json({bucket:p.bucket,key:p.key,size:result.size,sha256:result.sha256,etag:meta.etag,url:`${PUBLIC}/api/v1/objects/${p.bucket}/${p.key}`});}catch(e){if(e.code==='LIMIT') return res.status(413).json({error:e.message}); next(e)}});
 app.delete('/api/v1/multipart/:uploadId',async(req,res,next)=>{try{const p=db.prepare('SELECT * FROM multipart_uploads WHERE upload_id=?').get(req.params.uploadId);if(!p)return res.sendStatus(404);const parts=db.prepare('SELECT path FROM multipart_parts WHERE upload_id=?').all(p.upload_id);for(const x of parts)await fs.promises.rm(x.path,{force:true});db.prepare('DELETE FROM multipart_parts WHERE upload_id=?').run(p.upload_id);db.prepare('DELETE FROM multipart_uploads WHERE upload_id=?').run(p.upload_id);res.status(204).end()}catch(e){next(e)}});
 app.post('/api/v1/multipart/:bucket/*key', (req,res)=>{const b=req.params.bucket,k=getKey(req),id=uuid(),now=new Date().toISOString();db.prepare('INSERT INTO multipart_uploads(upload_id,bucket,key,content_type,created_at) VALUES(?,?,?,?,?)').run(id,b,k,req.get('content-type')||mime.lookup(k)||'application/octet-stream',now);res.status(201).json({uploadId:id,bucket:b,key:k});});
 
