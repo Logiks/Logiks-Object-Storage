@@ -1,13 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-
-const BUCKET_RE = /^[a-z0-9][a-z0-9.-]{1,62}$/;
+import { validateBucket } from './path-utils.js';
 
 export class FileSystemStorage {
   constructor(root, tmpRoot) { this.root = root; this.tmpRoot = tmpRoot; }
   safePath(bucket, key) {
-    if (!BUCKET_RE.test(bucket)) throw new Error('Invalid bucket');
+    validateBucket(bucket);
     if (typeof key !== 'string' || !key || key.includes('\0')) throw new Error('Invalid object key');
     const clean = key.replace(/^\/+/, '');
     const full = path.resolve(this.root, bucket, clean);
@@ -35,7 +34,10 @@ export class FileSystemStorage {
       return { path: target, size, sha256: hash.digest('hex') };
     } catch (e) { out.destroy(); await fs.promises.rm(temp, { force: true }); throw e; }
   }
-  stream(bucket, key) { return fs.createReadStream(this.safePath(bucket, key)); }
+  createReadStream(bucket, key, range) {
+    const p = this.safePath(bucket, key);
+    return range ? fs.createReadStream(p, { start: range.start, end: range.end }) : fs.createReadStream(p);
+  }
   stat(bucket, key) { return fs.promises.stat(this.safePath(bucket, key)); }
   async remove(bucket, key) {
     const target = this.safePath(bucket, key);

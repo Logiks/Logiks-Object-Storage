@@ -1,6 +1,26 @@
 # Logiks Object Storage
 
-A minimal, self-hosted, S3-style object storage server built with Express. Files are streamed straight to/from disk, so uploads, downloads, and URL-fetches are **not** buffered in memory — large files (GBs) work fine.
+A minimal, self-hosted, S3-style object storage server built with Express. Files are streamed to/from the backend, so uploads, downloads, and URL-fetches are **not** buffered in memory — large files (GBs) work fine.
+
+The HTTP API below is the same no matter which backend actually holds the bytes.
+
+## Storage backends
+
+Set `STORAGE_BACKEND` to pick where objects are actually stored:
+
+| `STORAGE_BACKEND` | Backend | Required vars |
+|---|---|---|
+| `filesystem` (default) | Local disk | `STORAGE_ROOT` |
+| `s3` | Amazon S3 (or any S3-compatible service) | `S3_BUCKET`, `S3_REGION`, credentials |
+| `minio` | MinIO | `S3_BUCKET`, `S3_ENDPOINT`, credentials (same backend as `s3`, just a custom endpoint + path-style addressing) |
+| `azure` | Azure Blob Storage | `AZURE_CONTAINER`, plus a connection string or account name/key |
+| `sftp` | A directory on a remote host reached over SFTP | `SFTP_HOST`, `SFTP_USERNAME`, `SFTP_PASSWORD` or `SFTP_PRIVATE_KEY` |
+
+See `.env.example` for the full list of backend-specific variables.
+
+For every backend except SFTP (which maps onto a real remote directory tree, just like the filesystem backend), "bucket" in this API is a *logical* namespace, not a native cloud bucket: every object for a given backend lives under one configured bucket/container (`S3_BUCKET` / `AZURE_CONTAINER`), at a key of `<bucket>/<key>` — so you don't need bucket-creation permissions, just read/write access to one bucket or container.
+
+Multipart uploads always stage parts on local disk (under `TMP_ROOT`) regardless of backend, then stream the assembled object to whichever backend is active on `complete` — so switching backends never changes how the multipart API behaves.
 
 ## Start
 
@@ -52,7 +72,7 @@ The returned URL is signed and can be fetched without the API key until expiry.
 
 Recommended part size: 16–64 MB. Parts are streamed to temporary files.
 
-## Storage layout
+## Storage layout (filesystem backend)
 
 ```text
 data/
