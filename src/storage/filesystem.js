@@ -2,14 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
+const BUCKET_RE = /^[a-z0-9][a-z0-9.-]{1,62}$/;
+
 export class FileSystemStorage {
   constructor(root, tmpRoot) { this.root = root; this.tmpRoot = tmpRoot; }
   safePath(bucket, key) {
-    if (!/^[a-z0-9][a-z0-9.-]{1,62}$/.test(bucket)) throw new Error('Invalid bucket');
+    if (!BUCKET_RE.test(bucket)) throw new Error('Invalid bucket');
+    if (typeof key !== 'string' || !key || key.includes('\0')) throw new Error('Invalid object key');
     const clean = key.replace(/^\/+/, '');
     const full = path.resolve(this.root, bucket, clean);
     const base = path.resolve(this.root, bucket) + path.sep;
-    if (!full.startsWith(base) || clean.includes('\\0')) throw new Error('Invalid object key');
+    if (!full.startsWith(base)) throw new Error('Invalid object key');
     return full;
   }
   async putStream(bucket, key, stream, maxBytes) {
@@ -32,13 +35,22 @@ export class FileSystemStorage {
       return { path: target, size, sha256: hash.digest('hex') };
     } catch (e) { out.destroy(); await fs.promises.rm(temp, { force: true }); throw e; }
   }
-  async createWriteStream(bucket, key) {
-    const target = this.safePath(bucket, key);
-    await fs.promises.mkdir(path.dirname(target), { recursive: true });
-    return target;
-  }
   stream(bucket, key) { return fs.createReadStream(this.safePath(bucket, key)); }
   stat(bucket, key) { return fs.promises.stat(this.safePath(bucket, key)); }
-  async remove(bucket, key) { await fs.promises.rm(this.safePath(bucket, key), { force: true }); }
+  async remove(bucket, key) {
+    const target = this.safePath(bucket, key);
+    await fs.promises.rm(target, { force: true });
+    // Best-effort: prune now-empty parent directories back up to (but not including) the bucket root.
+    const bucketRoot = path.resolve(this.root, bucket);
+    let dir = path.dirname(target);
+    while (dir !== bucketRoot && dir.startsWith(bucketRoot + path.sep)) {
+      try {
+        await fs.promises.rmdir(dir);
+        dir = path.dirname(dir);
+      } catch {
+        break; // not empty (or already gone) — stop pruning
+      }
+    }
+  }
   exists(bucket, key) { return fs.promises.access(this.safePath(bucket, key)).then(() => true).catch(() => false); }
 }
