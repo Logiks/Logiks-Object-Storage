@@ -20,5 +20,13 @@ export function createDb(file) {
     size INTEGER NOT NULL, sha256 TEXT NOT NULL, created_at TEXT NOT NULL,
     PRIMARY KEY(upload_id, part_number)
   );`);
+  // Migration: add the `metadata` column (JSON-encoded x-meta-* headers) to
+  // databases created before it existed. CREATE TABLE IF NOT EXISTS above
+  // never alters an existing table, so this has to be done separately and
+  // idempotently.
+  const columns = db.prepare("PRAGMA table_info(objects)").all().map(c => c.name);
+  if (!columns.includes('metadata')) db.exec('ALTER TABLE objects ADD COLUMN metadata TEXT');
+  const mpColumns = db.prepare("PRAGMA table_info(multipart_uploads)").all().map(c => c.name);
+  if (!mpColumns.includes('metadata')) db.exec('ALTER TABLE multipart_uploads ADD COLUMN metadata TEXT');
   return db;
 }

@@ -18,17 +18,31 @@ export class SftpStorage {
   }
   // Lazily connects once and reuses the connection; concurrent callers
   // during the initial connect all await the same in-flight attempt.
+  // If the underlying SSH session drops (idle timeout, network blip, remote
+  // restart), SftpClient re-emits 'close'/'end'/'error' — we clear the cached
+  // client on any of those so the *next* call reconnects instead of handing
+  // out a dead connection forever.
   async client() {
     if (this._client) return this._client;
     if (!this._connecting) {
       this._connecting = (async () => {
         const c = new SftpClient();
         await c.connect(this.config);
+        // SftpClient.on() doesn't return `this`, so these can't be chained.
+        const drop = () => { if (this._client === c) { this._client = null; this._connecting = null; } };
+        c.on('close', drop);
+        c.on('end', drop);
+        c.on('error', drop);
         this._client = c;
         return c;
       })().catch((e) => { this._connecting = null; throw e; });
     }
     return this._connecting;
+  }
+  async close() {
+    if (this._client) await this._client.end().catch(() => {});
+    this._client = null;
+    this._connecting = null;
   }
   remotePath(bucket, key) {
     validateBucket(bucket);
@@ -38,7 +52,9 @@ export class SftpStorage {
     const c = await this.client();
     if ((await c.exists(dir)) === false) await c.mkdir(dir, true);
   }
-  async putStream(bucket, key, stream, maxBytes) {
+  // contentType is accepted for interface parity but unused — SFTP has no
+  // content-type attribute; it's already tracked in the metadata DB.
+  async putStream(bucket, key, stream, maxBytes, _contentType) {
     const remote = this.remotePath(bucket, key);
     await this.ensureDir(path.posix.dirname(remote));
     const c = await this.client();
@@ -71,5 +87,12 @@ export class SftpStorage {
   async exists(bucket, key) {
     const c = await this.client();
     return (await c.exists(this.remotePath(bucket, key))) !== false;
+  }
+  // Used by the /api/v1/health/ready probe to confirm the SFTP connection is
+  // actually up (and reconnects it if it had dropped), not just that the
+  // process is up.
+  async ping() {
+    const c = await this.client();
+    if ((await c.exists(this.basePath)) === false) throw new Error(`SFTP_BASE_PATH "${this.basePath}" does not exist`);
   }
 }

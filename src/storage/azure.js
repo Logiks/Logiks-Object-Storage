@@ -29,10 +29,11 @@ export class AzureBlobStorage {
     validateBucket(bucket);
     return `${this.prefix}${bucket}/${normalizeKey(key)}`;
   }
-  async putStream(bucket, key, stream, maxBytes) {
+  async putStream(bucket, key, stream, maxBytes, contentType) {
     await this.ensureContainer();
     const block = this.container.getBlockBlobClient(this.blobName(bucket, key));
-    return streamWithLimitAndHash(stream, maxBytes, (body) => block.uploadStream(body));
+    const options = contentType ? { blobHTTPHeaders: { blobContentType: contentType } } : undefined;
+    return streamWithLimitAndHash(stream, maxBytes, (body) => block.uploadStream(body, undefined, undefined, options));
   }
   async createReadStream(bucket, key, range) {
     const block = this.container.getBlockBlobClient(this.blobName(bucket, key));
@@ -54,4 +55,8 @@ export class AzureBlobStorage {
     const block = this.container.getBlockBlobClient(this.blobName(bucket, key));
     return block.exists();
   }
+  // Used by the /api/v1/health/ready probe to confirm the configured
+  // container/account is actually reachable, not just that the process is up.
+  async ping() { await this.ensureContainer(); }
+  async close() {} // the Azure SDK's HTTP client has no explicit teardown
 }

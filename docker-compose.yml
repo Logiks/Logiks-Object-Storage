@@ -10,8 +10,18 @@ services:
       DB_PATH: ${DB_PATH:-/data/metadata.db}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
       STORAGE_API_KEY: ${STORAGE_API_KEY:-change-me}
+      # Quoted: this is JSON (e.g. [{"key":"...","buckets":["a"]}]) and would
+      # otherwise be misparsed as a YAML flow sequence.
+      STORAGE_API_KEYS: "${STORAGE_API_KEYS:-}"
       PRESIGN_SECRET: ${PRESIGN_SECRET:-change-this-to-a-long-random-secret}
       MAX_OBJECT_SIZE: ${MAX_OBJECT_SIZE:-107374182400}
+      SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-10000}
+      READY_TIMEOUT_MS: ${READY_TIMEOUT_MS:-5000}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-0}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      TLS_CERT_FILE: ${TLS_CERT_FILE:-}
+      TLS_KEY_FILE: ${TLS_KEY_FILE:-}
       # Which backend holds the object bytes. See .env.example for the full
       # set of backend-specific vars (S3_*, AZURE_*, SFTP_*) — set whichever
       # ones your chosen backend needs in your .env file; unused ones are

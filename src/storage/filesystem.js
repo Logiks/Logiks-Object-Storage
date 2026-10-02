@@ -14,7 +14,10 @@ export class FileSystemStorage {
     if (!full.startsWith(base)) throw new Error('Invalid object key');
     return full;
   }
-  async putStream(bucket, key, stream, maxBytes) {
+  // contentType is accepted for interface parity with the cloud backends but
+  // unused here — plain files on disk have no content-type attribute of
+  // their own; it's already tracked in the metadata DB.
+  async putStream(bucket, key, stream, maxBytes, _contentType) {
     const target = this.safePath(bucket, key);
     await fs.promises.mkdir(path.dirname(target), { recursive: true });
     const temp = path.join(this.tmpRoot, crypto.randomUUID() + '.upload');
@@ -55,4 +58,8 @@ export class FileSystemStorage {
     }
   }
   exists(bucket, key) { return fs.promises.access(this.safePath(bucket, key)).then(() => true).catch(() => false); }
+  // Used by the /api/v1/health/ready probe to confirm the storage root is
+  // actually reachable/writable, not just that the process is up.
+  async ping() { await fs.promises.access(this.root, fs.constants.R_OK | fs.constants.W_OK); }
+  async close() {} // nothing to tear down
 }

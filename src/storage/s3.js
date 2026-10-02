@@ -1,4 +1,4 @@
-import { S3Client, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, HeadObjectCommand, HeadBucketCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { validateBucket, normalizeKey } from './path-utils.js';
 import { streamWithLimitAndHash } from './stream-utils.js';
@@ -28,10 +28,10 @@ export class S3Storage {
     validateBucket(bucket);
     return `${this.prefix}${bucket}/${normalizeKey(key)}`;
   }
-  async putStream(bucket, key, stream, maxBytes) {
+  async putStream(bucket, key, stream, maxBytes, contentType) {
     const Key = this.objectKey(bucket, key);
     return streamWithLimitAndHash(stream, maxBytes, async (body) => {
-      const upload = new Upload({ client: this.client, params: { Bucket: this.bucket, Key, Body: body } });
+      const upload = new Upload({ client: this.client, params: { Bucket: this.bucket, Key, Body: body, ContentType: contentType || undefined } });
       try {
         await upload.done();
       } catch (e) {
@@ -59,4 +59,9 @@ export class S3Storage {
     try { await this.stat(bucket, key); return true; }
     catch (e) { if (e.name === 'NotFound' || e.$metadata?.httpStatusCode === 404) return false; throw e; }
   }
+  // Used by the /api/v1/health/ready probe to confirm the configured bucket
+  // is actually reachable with the given credentials, not just that the
+  // process is up.
+  async ping() { await this.client.send(new HeadBucketCommand({ Bucket: this.bucket })); }
+  async close() { this.client.destroy(); }
 }
